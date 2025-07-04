@@ -1,6 +1,8 @@
 """Copyright (c) Meta Platforms, Inc. and affiliates."""
 
 import os
+import pandas as pd
+import periodictable
 from functools import partial
 from typing import Any, Dict, Optional, Sequence, Tuple
 
@@ -8,7 +10,7 @@ import torch
 from lightning import LightningDataModule
 from omegaconf import DictConfig
 from torch.utils.data import ConcatDataset
-from torch_geometric.data import Data
+from torch_geometric.data import Data, Dataset
 from torch_geometric.datasets import QM9
 from torch_geometric.loader import DataLoader
 
@@ -46,6 +48,58 @@ def custom_transform(data, removeHs=True):
         dataset_idx=torch.tensor([1], dtype=torch.long),  # 1 --> indicates non-periodic/molecule
     )
 
+class ZINC(Dataset):
+    def __init__(self, root_dir, transform=None, pre_transform=None):
+        super().__init__(root_dir, transform, pre_transform)
+        self.file_index = []  # List of (file_path, row_idx)
+
+        # Build index across all .pkl files
+        for file in os.listdir(root_dir):
+            if file.endswith('.pkl'):
+                file_path = os.path.join(root_dir, file)
+                df = pd.read_pickle(file_path, compression="gzip")
+                self.file_index.extend([(file_path, i) for i in range(len(df))])
+
+    def len(self):
+        return len(self.file_index)
+
+    def get(self, idx):
+        file_path, row_idx = self.file_index[idx]
+        df = pd.read_pickle(file_path, compression="gzip").reset_index(drop=True)
+        row = df.iloc[row_idx]
+        return self.process_df_row(row)
+
+    # ZINC adapted for ADiT 
+    def process_df_row(self, row, removeHs=False):
+        
+        z = torch.tensor(list(map(lambda x: periodictable.elements.symbol(x).number, row['atom_types']))) #convert atomic symbol into atomic number
+
+        atoms_to_keep = torch.ones_like(z, dtype=torch.bool)
+        num_atoms = row['lig_natoms']
+        if removeHs:
+            atoms_to_keep = z != 1
+            num_atoms = atoms_to_keep.sum().item()
+
+        coords = torch.tensor(row['lig_coords'])
+        
+        return Data(
+            id=row['pdbid'],
+            atom_types=z[atoms_to_keep],
+            pos=coords[atoms_to_keep],
+            frac_coords=torch.zeros_like(coords[atoms_to_keep]),
+            cell=torch.zeros((1, 3, 3)),
+            lattices=torch.zeros(1, 6),
+            lattices_scaled=torch.zeros(1, 6),
+            lengths=torch.zeros(1, 3),
+            lengths_scaled=torch.zeros(1, 3),
+            angles=torch.zeros(1, 3),
+            angles_radians=torch.zeros(1, 3),
+            num_atoms=torch.LongTensor([num_atoms]),
+            num_nodes=torch.LongTensor([num_atoms]),  # special attribute used for PyG batching
+            spacegroup=torch.zeros(1, dtype=torch.long),  # null spacegroup
+            token_idx=torch.arange(num_atoms),
+            dataset_idx=torch.tensor([1], dtype=torch.long),  # 1 --> indicates non-periodic/molecule
+        )
 
 class JointDataModule(LightningDataModule):
     """`LightningDataModule` for jointly training on 3D atomic datasets:
