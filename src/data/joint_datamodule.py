@@ -1,8 +1,5 @@
 """Copyright (c) Meta Platforms, Inc. and affiliates."""
 
-import os
-import pandas as pd
-import periodictable
 from functools import partial
 from typing import Any, Dict, Optional, Sequence, Tuple
 
@@ -10,10 +7,11 @@ import torch
 from lightning import LightningDataModule
 from omegaconf import DictConfig
 from torch.utils.data import ConcatDataset
-from torch_geometric.data import Data, Dataset
+from torch_geometric.data import Data 
 from torch_geometric.datasets import QM9
 from torch_geometric.loader import DataLoader
 
+from src.data.components.zinc_dataset import ZINC
 from src.data.components.mp20_dataset import MP20
 from src.data.components.qmof150_dataset import QMOF150
 from src.utils import pylogger
@@ -47,59 +45,6 @@ def custom_transform(data, removeHs=True):
         token_idx=torch.arange(num_atoms),
         dataset_idx=torch.tensor([1], dtype=torch.long),  # 1 --> indicates non-periodic/molecule
     )
-
-class ZINC(Dataset):
-    def __init__(self, root_dir, transform=None, pre_transform=None):
-        super().__init__(root_dir, transform, pre_transform)
-        self.file_index = []  # List of (file_path, row_idx)
-
-        # Build index across all .pkl files
-        for file in os.listdir(root_dir):
-            if file.endswith('.pkl'):
-                file_path = os.path.join(root_dir, file)
-                df = pd.read_pickle(file_path, compression="gzip")
-                self.file_index.extend([(file_path, i) for i in range(len(df))])
-
-    def len(self):
-        return len(self.file_index)
-
-    def get(self, idx):
-        file_path, row_idx = self.file_index[idx]
-        df = pd.read_pickle(file_path, compression="gzip").reset_index(drop=True)
-        row = df.iloc[row_idx]
-        return self.process_df_row(row)
-
-    # ZINC adapted for ADiT 
-    def process_df_row(self, row, removeHs=False):
-        
-        z = torch.tensor(list(map(lambda x: periodictable.elements.symbol(x).number, row['atom_types']))) #convert atomic symbol into atomic number
-
-        atoms_to_keep = torch.ones_like(z, dtype=torch.bool)
-        num_atoms = row['lig_natoms']
-        if removeHs:
-            atoms_to_keep = z != 1
-            num_atoms = atoms_to_keep.sum().item()
-
-        coords = torch.tensor(row['lig_coords'])
-        
-        return Data(
-            id=row['pdbid'],
-            atom_types=z[atoms_to_keep],
-            pos=coords[atoms_to_keep],
-            frac_coords=torch.zeros_like(coords[atoms_to_keep]),
-            cell=torch.zeros((1, 3, 3)),
-            lattices=torch.zeros(1, 6),
-            lattices_scaled=torch.zeros(1, 6),
-            lengths=torch.zeros(1, 3),
-            lengths_scaled=torch.zeros(1, 3),
-            angles=torch.zeros(1, 3),
-            angles_radians=torch.zeros(1, 3),
-            num_atoms=torch.LongTensor([num_atoms]),
-            num_nodes=torch.LongTensor([num_atoms]),  # special attribute used for PyG batching
-            spacegroup=torch.zeros(1, dtype=torch.long),  # null spacegroup
-            token_idx=torch.arange(num_atoms),
-            dataset_idx=torch.tensor([1], dtype=torch.long),  # 1 --> indicates non-periodic/molecule
-        )
 
 class JointDataModule(LightningDataModule):
     """`LightningDataModule` for jointly training on 3D atomic datasets:
@@ -165,6 +110,21 @@ class JointDataModule(LightningDataModule):
 
         :param stage: The stage to setup. Either `"fit"`, `"validate"`, `"test"`, or `"predict"`. Defaults to ``None``.
         """
+
+        # ZINC dataset
+        zinc_dataset = ZINC(
+            root=self.hparams.datasets.zinc.root,
+            pickle_path=self.hparams.datasets.zinc.pickle_path,
+            force_reload=self.hparams.datasets.zinc.force_reload
+        )
+
+        self.zinc_test_dataset = zinc_dataset[:100]
+        self.zinc_val_dataset = zinc_dataset[100:200]
+        self.zinc_train_dataset = zinc_dataset[200:]
+
+        # If needed, implement the proportion code to account for the
+        # setting in the zinc_only.yaml (or joint.yaml, not configured) config file 
+
         # QM9 dataset
         qm9_dataset = QM9(
             root=self.hparams.datasets.qm9.root,
@@ -239,19 +199,21 @@ class JointDataModule(LightningDataModule):
 
         if stage is None or stage in ["fit", "validate"]:
             self.train_dataset = ConcatDataset(
-                [self.mp20_train_dataset, self.qm9_train_dataset, self.qmof150_train_dataset]
+                [self.zinc_train_dataset, self.mp20_train_dataset, self.qm9_train_dataset, self.qmof150_train_dataset]
             )
             log.info(
-                f"Training dataset: {len(self.train_dataset)} samples (MP20: {len(self.mp20_train_dataset)}, QM9: {len(self.qm9_train_dataset)}, QMOF150: {len(self.qmof150_train_dataset)})"
+                f"Training dataset: {len(self.train_dataset)} samples (MP20: {len(self.mp20_train_dataset)}, QM9: {len(self.qm9_train_dataset)}, QMOF150: {len(self.qmof150_train_dataset)}, ZINC: {len(self.zinc_train_dataset)}"
             )
             log.info(f"MP20 validation dataset: {len(self.mp20_val_dataset)} samples")
             log.info(f"QM9 validation dataset: {len(self.qm9_val_dataset)} samples")
             log.info(f"QMOF150 validation dataset: {len(self.qmof150_val_dataset)} samples")
+            log.info(f"ZINC validation dataset: {len(self.zinc_val_dataset)} samples")
 
         if stage is None or stage in ["test", "predict"]:
             log.info(f"MP20 test dataset: {len(self.mp20_test_dataset)} samples")
             log.info(f"QM9 test dataset: {len(self.qm9_test_dataset)} samples")
             log.info(f"QMOF150 test dataset: {len(self.qmof150_test_dataset)} samples")
+            log.info(f"ZINC test dataset: {len(self.zinc_test_dataset)} samples")
 
     def train_dataloader(self) -> DataLoader:
         """Create and return the train dataloader.
@@ -294,6 +256,14 @@ class JointDataModule(LightningDataModule):
                 pin_memory=False,
                 shuffle=False,
             ),
+            DataLoader(
+                dataset=self.zinc_val_dataset,
+                batch_size=self.hparams.batch_size.val,
+                num_workers=self.hparams.num_workers.val,
+                pin_memory=False,
+                shuffle=False,
+
+            ),
         ]
 
     def test_dataloader(self) -> Sequence[DataLoader]:
@@ -318,6 +288,13 @@ class JointDataModule(LightningDataModule):
             ),
             DataLoader(
                 dataset=self.qmof150_test_dataset,
+                batch_size=self.hparams.batch_size.test,
+                num_workers=self.hparams.num_workers.test,
+                pin_memory=False,
+                shuffle=False,
+            ),
+            DataLoader(
+                dataset=self.zinc_test_dataset,
                 batch_size=self.hparams.batch_size.test,
                 num_workers=self.hparams.num_workers.test,
                 pin_memory=False,

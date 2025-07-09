@@ -155,3 +155,9 @@ configs/local/default.yaml
 
 # Aim logging
 .aim
+
+
+# Data files
+*.pt
+*.csv
+*.pkl

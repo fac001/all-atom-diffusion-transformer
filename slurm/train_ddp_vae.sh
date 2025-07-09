@@ -45,8 +45,8 @@
 ###module list
 
 #! Load python environment
-source /private/home/myuser/.bashrc
-mamba activate myenv
+# source /private/home/myuser/.bashrc
+# mamba activate myenv
 
 ############################################################
 
@@ -54,8 +54,8 @@ mamba activate myenv
 application="srun python /private/home/myuser/all-atom-diffusion-transformer/src/train_autoencoder.py"
 
 #! Set hparams in configs/autoencoder_module/vae.yaml, or below:
-latent_dim=8  # 4 / 8
-loss_kl=0.00001  # 0.0001 / 0.00001
+latent_dim=8    # 4 / 8
+loss_kl=0.00001 # 0.0001 / 0.00001
 
 #! (for logging purposes)
 latent_str="latent@${latent_dim}"
@@ -66,7 +66,7 @@ name="vae_${latent_str}_${kl_str}"
 options="trainer=ddp logger=wandb name=$name ++autoencoder_module.latent_dim=$latent_dim ++autoencoder_module.loss_weights.loss_kl.mp20=$loss_kl ++autoencoder_module.loss_weights.loss_kl.qm9=$loss_kl"
 
 #! Work directory (i.e. where the job will run):
-workdir="/private/home/myuser/all-atom-diffusion-transformer/"
+workdir="~/workingproj/adit/all-atom-diffusion-transformer/"
 
 CMD="$application $options"
 
@@ -75,14 +75,14 @@ CMD="$application $options"
 ###############################################################
 
 cd $workdir
-echo -e "Changed directory to `pwd`.\n"
+echo -e "Changed directory to $(pwd).\n"
 
 JOBID=$SLURM_JOB_ID
 
 echo -e "JobID: $JOBID\n======"
-echo "Time: `date`"
-echo "Running on master node: `hostname`"
-echo "Current directory: `pwd`"
+echo "Time: $(date)"
+echo "Running on master node: $(hostname)"
+echo "Current directory: $(pwd)"
 echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
 
 echo -e "\nExecuting command:\n==================\n$CMD\n"
